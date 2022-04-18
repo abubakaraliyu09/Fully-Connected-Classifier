@@ -1,0 +1,143 @@
+import os
+import warnings
+warnings.filterwarnings('ignore')
+warnings.filterwarnings('always')
+import numpy as np
+import pandas as pd
+import cv2
+from tqdm import tqdm
+import keras
+from sklearn.model_selection import KFold
+from keras.applications.densenet import DenseNet121
+from keras.preprocessing import image
+from keras.applications.densenet import preprocess_input, decode_predictions
+from keras.models import Model
+from keras.layers import Dense, GlobalAveragePooling2D, Dropout
+from keras.utils.np_utils import to_categorical
+from sklearn.model_selection import train_test_split
+from sklearn.decomposition import PCA
+from sklearn.manifold import TSNE
+from sklearn.svm import SVC
+from sklearn.metrics import accuracy_score
+from sklearn.metrics import classification_report, confusion_matrix
+from matplotlib import pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+warnings.filterwarnings(action='ignore', category=DeprecationWarning, message='`np.bool` is a deprecated alias')
+
+def denoise_img(image):
+    return cv2.fastNlMeansDenoisingColored(image,10,10,7,15)
+
+DIR='Binary_data/small_data'
+BURNS_DIR='Binary_data/small_data/0'
+HEALTHY_DIR='Binary_data/small_data/1'
+X=[]
+Y=[]
+img_size =112
+def assign_label(img,image_type):
+    return image_type
+
+def make_train_data(image_type,DIR):
+    for img in tqdm(os.listdir(DIR)):
+        label=assign_label(img,image_type)
+        path=os.path.join(DIR,img)
+        img=cv2.imread(path,cv2.IMREAD_COLOR)
+        img = cv2.fastNlMeansDenoisingColored(img)
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        img=cv2.resize(img,(img_size,img_size))
+        X.append(np.array(img))
+        Y.append(str(label))
+make_train_data('0',BURNS_DIR)
+make_train_data('1',HEALTHY_DIR)
+
+#convert to categorical
+Y = to_categorical(Y)
+
+#Split the dataset
+X_train, X_validation, Y_train, Y_validation = train_test_split(X,Y,test_size=0.2,random_state=0)
+X_train, X_test, Y_train, Y_test = train_test_split(X_train,Y_train,test_size=0.1,random_state=0)
+
+# define 10-fold cross validation test harness
+kfold = KFold(n_splits=2, shuffle=True, random_state=0)
+acc_per_fold = []
+loss_per_fold = []
+cvscores = []
+
+# K-fold Cross Validation model evaluation
+fold_no = 1
+for train, test in kfold.split(X_train, Y_train):
+    #Pre-trained DenseNet Model
+    base_model = DenseNet121(weights='imagenet', include_top=False)
+    x = base_model.output
+    x = GlobalAveragePooling2D()(x)
+    #x = Dense(64, activation='relu')(x)
+    x = Dropout(0.2)(x)
+    #x = Dense(32, activation='relu')(x)
+    predictions = Dense(2, activation='softmax')(x)
+
+    model = Model(inputs=base_model.input, outputs=predictions)
+
+    # Freeze all convolutional DenseNet layers and train only top layers (FC)
+    for layer in base_model.layers:
+        layer.trainable = False
+
+    #model.compile(optimizer='rmsprop', loss='categorical_crossentropy', metrics=['acc'])
+    base_learning_rate = 0.01
+    model.compile(optimizer=keras.optimizers.rmsprop(learning_rate=base_learning_rate),
+                  loss=keras.losses.BinaryCrossentropy(from_logits=True),
+                  metrics=['acc'])
+
+    #model.summary()
+
+    # Generate a print
+    print('------------------------------------------------------------------------')
+    print(f'Training for fold {fold_no} ...')
+
+    history = model.fit(X_train, Y_train,
+                        epochs=1,
+                        batch_size=2,validation_data=(X_validation,Y_validation),verbose=1)
+
+    # Generate generalization metrics
+    scores = model.evaluate(X_test,Y_test, verbose=0)
+    print(f'Score for fold {fold_no}: {model.metrics_names[0]} of {scores[0]}; {model.metrics_names[1]} of {scores[1] * 100}%')
+    acc_per_fold.append(scores[1] * 100)
+    loss_per_fold.append(scores[0])
+
+    # Increase fold number
+    fold_no = fold_no + 1
+    result = {'acc_per_fold': acc_per_fold, 'loss_per_fold': loss_per_fold}
+    result_df = pd.DataFrame.from_dict(result)
+    result_df.to_csv('results2.csv',index=False, header=True)
+
+
+# == Provide average scores ==
+print('------------------------------------------------------------------------')
+print('Score per fold')
+for i in range(0, len(acc_per_fold)):
+    print('------------------------------------------------------------------------')
+    print(f'> Fold {i+1} - Loss: {loss_per_fold[i]} - Accuracy: {acc_per_fold[i]}%')
+print('------------------------------------------------------------------------')
+print('Average scores for all folds:')
+print(f'> Accuracy: {np.mean(acc_per_fold)} (+- {np.std(acc_per_fold)})')
+print(f'> Loss: {np.mean(loss_per_fold)}')
+print('------------------------------------------------------------------------')
+
+
+acc = history.history['acc']
+#val_acc = history.history['val_acc']
+loss = history.history['loss']
+#val_loss = history.history['val_loss']
+
+epochs = range(len(acc))
+
+plt.plot(epochs, loss, '--', label='Training loss')
+#plt.plot(epochs, val_loss, 'b', label='Validation loss')
+plt.title('Training and validation loss')
+plt.legend()
+
+plt.show()
+#Accuracy
+plt.plot(epochs, acc, '--', label='Training acc')
+#plt.plot(epochs, val_acc, 'b', label='Validation acc')
+plt.title('Training and validation accuracy')
+plt.legend()
+plt.show()
